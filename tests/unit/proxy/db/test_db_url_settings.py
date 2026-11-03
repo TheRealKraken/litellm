@@ -1280,22 +1280,22 @@ def test_reader_keeps_its_own_pinned_idle_lifetime(monkeypatch):
 @pytest.mark.parametrize(
     "writer_limit, reader_limit, num_workers, expected",
     [
-        ("10", None, "4", "4 worker(s) x writer connection_limit 10 = up to 40 connections"),
+        ("8", None, "4", "4 worker(s) x (writer connection_limit 8 + native writer pool 2) = up to 40 connections"),
         (
-            "10",
-            "10",
+            "8",
+            "8",
             "4",
-            "4 worker(s) x (writer connection_limit 10 + reader connection_limit 10) = up to 80 connections",
+            "4 worker(s) x (writer connection_limit 8 + native writer pool 2 + reader connection_limit 8) = up to 72 connections",
         ),
         (
-            "10",
+            "8",
             "50",
             "4",
-            "4 worker(s) x (writer connection_limit 10 + reader connection_limit 50) = up to 240 connections",
+            "4 worker(s) x (writer connection_limit 8 + native writer pool 2 + reader connection_limit 50) = up to 240 connections",
         ),
-        ("10", None, "0", "1 worker(s) x writer connection_limit 10 = up to 10 connections"),
+        ("8", None, "0", "1 worker(s) x (writer connection_limit 8 + native writer pool 2) = up to 10 connections"),
     ],
-    ids=["writer_only", "reader_doubles_engines", "reader_pins_its_own_limit", "worker_floor"],
+    ids=["writer_only", "reader_adds_an_engine", "reader_pins_its_own_limit", "worker_floor"],
 )
 def test_connection_budget_message_sums_the_engines_each_worker_owns(
     writer_limit: str, reader_limit: str | None, num_workers: str, expected: str
@@ -1307,6 +1307,13 @@ def test_connection_budget_message_sums_the_engines_each_worker_owns(
     )
     assert expected in message
     assert "max_connections minus superuser_reserved_connections" in message
+
+
+@pytest.mark.parametrize("limit, prisma", [(10, 8), (3, 1), (2, 1), (1, 1)])
+def test_prisma_keeps_the_limit_minus_the_native_share_and_never_less_than_one(limit: int, prisma: int) -> None:
+    from litellm.proxy.db.db_url_settings import prisma_connection_share
+
+    assert prisma_connection_share(limit) == prisma
 
 
 def test_connection_budget_message_survives_an_unparseable_limit() -> None:

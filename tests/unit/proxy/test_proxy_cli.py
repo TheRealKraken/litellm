@@ -16,6 +16,7 @@ import click
 import fastapi
 import httpx
 import pytest
+from pydantic import TypeAdapter
 
 
 import builtins
@@ -1112,7 +1113,7 @@ class TestProxyInitializationHelpers:
             ), f"exit_code={result.exit_code}, output={result.output}"
             mock_append_query_params.assert_called()
             appended_params = mock_append_query_params.call_args.args[1]
-            assert appended_params["connection_limit"] == 5
+            assert appended_params["connection_limit"] == 3
             assert appended_params["pool_timeout"] == expected_timeout
 
     def test_build_db_connection_url_params_defaults(self):
@@ -3695,6 +3696,54 @@ def _run_server_and_capture_urls(
         return {k: os.environ[k] for k in _CAPTURED_DB_ENV_VARS if k in os.environ}
 
 
+_CAPTURED_URLS: Final = TypeAdapter(dict[str, str])
+
+
+@pytest.mark.parametrize(
+    "general_settings, database_url, expected_limit, expected_name, expected_direct_limit",
+    [
+        pytest.param({}, "postgresql://t:t@localhost:5432/t", "8", "litellm-prisma", "10", id="default_ten_splits"),
+        pytest.param(
+            {"database_connection_pool_limit": 30},
+            "postgresql://t:t@localhost:5432/t?application_name=ops",
+            "28",
+            "ops",
+            "30",
+            id="configured_limit_and_operator_name",
+        ),
+        pytest.param(
+            {"database_extra_connection_params": {"connection_limit": 5}},
+            "postgresql://t:t@localhost:5432/t",
+            "3",
+            "litellm-prisma",
+            "5",
+            id="extra_params_override_splits",
+        ),
+    ],
+)
+def test_prisma_keeps_the_connection_limit_minus_the_native_share(
+    tmp_path: Path,
+    general_settings: dict[str, object],
+    database_url: str,
+    expected_limit: str,
+    expected_name: str,
+    expected_direct_limit: str,
+) -> None:
+    config_path: Final = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump({"model_list": [], "general_settings": general_settings}))
+
+    captured: Final = _CAPTURED_URLS.validate_python(
+        _run_server_and_capture_urls(
+            str(config_path), database_url=database_url, direct_url="postgresql://t:t@localhost:5432/t"
+        )
+    )
+
+    writer: Final = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL"]).query)
+    direct: Final = urlparse.parse_qs(urlparse.urlparse(captured["DIRECT_URL"]).query)
+    assert (writer["connection_limit"], writer["application_name"]) == ([expected_limit], [expected_name])
+    assert direct["connection_limit"] == [expected_direct_limit]
+
+
 class TestReadReplicaConnectionParams:
     """The reader is a second Prisma client with its own pool. Without the
     configured params on DATABASE_URL_READ_REPLICA it sizes itself from Prisma's
@@ -3728,7 +3777,8 @@ class TestReadReplicaConnectionParams:
         )
 
         query = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL_READ_REPLICA"]).query)
-        assert query["connection_limit"] == ["3"]
+        assert query["connection_limit"] == ["1"]
+        assert query["application_name"] == ["litellm-prisma"]
         assert query["pool_timeout"] == ["20"]
         assert query["connect_timeout"] == ["15"]
         assert query["socket_timeout"] == ["120"]
@@ -3781,7 +3831,7 @@ class TestReadReplicaConnectionParams:
         )
 
         assert (
-            "1 worker(s) x (writer connection_limit 3 + reader connection_limit 50) = up to 53 connections"
+            "1 worker(s) x (writer connection_limit 1 + native writer pool 2 + reader connection_limit 50) = up to 53 connections"
             in capsys.readouterr().out
         )
 
@@ -3802,7 +3852,7 @@ class TestReadReplicaConnectionParams:
             extra_args=("--run_hypercorn", "--num_workers", "4"),
         )
 
-        assert "1 worker(s) x writer connection_limit 3 = up to 3 connections" in capsys.readouterr().out
+        assert "1 worker(s) x (writer connection_limit 1 + native writer pool 2) = up to 3 connections" in capsys.readouterr().out
 
     def test_extra_connection_params_never_carry_a_schema_override_to_the_reader(self, tmp_path):
         """database_extra_connection_params is an untyped passthrough, so it can carry a
@@ -3836,7 +3886,7 @@ class TestReadReplicaConnectionParams:
         assert writer_query["schema"] == ["writer_schema"]
 
         reader_query = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL_READ_REPLICA"]).query)
-        assert reader_query["connection_limit"] == ["3"]
+        assert reader_query["connection_limit"] == ["1"]
         assert reader_query["socket_timeout"] == ["90"]
         assert "options" not in reader_query
         assert "schema" not in reader_query

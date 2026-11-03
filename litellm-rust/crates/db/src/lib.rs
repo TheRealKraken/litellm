@@ -7,7 +7,9 @@ macro_rules_attribute::attribute_alias! {
 }
 
 mod daily_spend;
+mod deadline;
 mod end_user;
+mod endpoint;
 mod error;
 mod failure;
 mod spend;
@@ -15,7 +17,9 @@ mod spend;
 mod test_support;
 
 pub use daily_spend::{DailyEndUserRow, DailyTeamRow, DailyUserRow};
+pub use deadline::within;
 pub use end_user::{EndUser, RateLimits, find_end_user};
+pub use endpoint::{ClientIdentity, Endpoint, PoolLimits, SslMode};
 pub use error::Error;
 pub use failure::DbFailure;
 pub use spend::{
