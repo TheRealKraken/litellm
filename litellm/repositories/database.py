@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from litellm._logging import verbose_proxy_logger
+from litellm.proxy.db.db_span import proxy_service_logging
 from litellm.proxy.db.native_database import (
     NativeEndpointSettings,
+    ServiceLoggingEvents,
     TokenRotation,
     keep_token_fresh,
     reader_token_rotation,
@@ -49,7 +51,11 @@ class Database:
         try:
             writer: Final = await resolve_native_endpoint(writer_url)
             reader: Final = None if reader_url is None else await resolve_native_endpoint(reader_url)
-            native: Final = await NativeDatabase.connect(writer.endpoint, None if reader is None else reader.endpoint)
+            native: Final = await NativeDatabase.connect(
+                ServiceLoggingEvents(loop=asyncio.get_running_loop(), service_logging=proxy_service_logging),
+                writer.endpoint,
+                None if reader is None else reader.endpoint,
+            )
         except BaseException:
             await prisma.aclose()
             raise
