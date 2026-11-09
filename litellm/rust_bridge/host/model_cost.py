@@ -41,14 +41,14 @@ def resolve(
     table.
 
     Shim: this is lookup logic, not host state. It stays here until ``get_model_info`` moves to Rust, when its body
-    becomes a native call. ``model_cost_registration_row`` asks the same question through ``_registration_base``,
+    becomes a native call. ``model_cost_registration_row`` asks the same question through ``registration_base``,
     so there is one resolver for both callers."""
     import litellm
-    from litellm.utils import _registration_base
+    from litellm.utils import registration_base
 
     if rows is not litellm.model_cost:
         return None
-    base = _registration_base(key, registration, custom_llm_provider)
+    base = registration_base(key, registration, custom_llm_provider)
     return Landing(base.key, base.entry, base.matched_builtin)
 
 

@@ -4126,11 +4126,11 @@ def model_cost_registration_row(key: str, provider: object) -> Mapping[str, obje
     """The row a ``register_model`` write of a ``key`` entry with this ``litellm_provider`` merges onto: the
     ``litellm.model_cost`` row it resolves to (``openai/o3-pro`` lands on ``o3-pro``), else the row it seeds ``key``
     with from the built-in entry it falls back to (an OpenAI fine-tune takes its base model's row)."""
-    base: Final = _registration_base(key, {"litellm_provider": provider}, custom_llm_provider=None)
+    base: Final = registration_base(key, {"litellm_provider": provider}, custom_llm_provider=None)
     return _builtin_cost_map().get(base.key) or base.entry
 
 
-def _registration_base(key: str, value: Mapping[str, object], custom_llm_provider: str | None) -> _RegistrationBase:
+def registration_base(key: str, value: Mapping[str, object], custom_llm_provider: str | None) -> _RegistrationBase:
     provider: Final = str(value.get("litellm_provider") or "")
     if _skips_builtin_registration_lookup(key, provider):
         return _RegistrationBase(key=key, entry=dict(_builtin_cost_map().get(key, {})), matched_builtin=True)

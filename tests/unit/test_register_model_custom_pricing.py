@@ -874,7 +874,7 @@ def test_register_model_keeps_its_price_when_a_reload_adopts_a_map_as_it_writes(
     }
 
     written_map: Final = {**builtin_cost_map, catalog_key: dict(catalog_row)}
-    registration_base: Final = litellm.utils._registration_base
+    registration_base: Final = litellm.utils.registration_base
 
     def reload_while_resolving(*args: object, **kwargs: object) -> object:
         resolved = registration_base(*args, **kwargs)
@@ -884,7 +884,7 @@ def test_register_model_keeps_its_price_when_a_reload_adopts_a_map_as_it_writes(
 
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     monkeypatch.setattr(litellm, "model_cost", written_map)
-    monkeypatch.setattr(litellm.utils, "_registration_base", reload_while_resolving)
+    monkeypatch.setattr(litellm.utils, "registration_base", reload_while_resolving)
     model_cost_changed()
 
     litellm.register_model(
@@ -1795,7 +1795,7 @@ def test_a_lookup_that_raises_reaches_the_caller_and_keeps_nothing(monkeypatch: 
     def failing_lookup(*_args: object, **_kwargs: object) -> NoReturn:
         raise error
 
-    monkeypatch.setattr(litellm.utils, "_registration_base", failing_lookup)
+    monkeypatch.setattr(litellm.utils, "registration_base", failing_lookup)
     registered_before: Final = model_cost_inputs.registered_keys()
 
     with pytest.raises(LookupError) as raised:
