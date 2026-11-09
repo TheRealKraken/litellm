@@ -122,8 +122,7 @@ impl NativeFetchFailed {
 
 struct Outcome(Result<Fetched, Failed>);
 
-/// Fetches on the shared runtime with a pooled client that follows redirects, as main's reload client did. For
-/// callers inside a worker, after any fork
+/// Fetches on the shared runtime with a pooled client. For callers inside a worker, after any fork
 pub(crate) fn fetch<'py>(
     py: Python<'py>,
     source: &NativeCostMapSource,
@@ -149,7 +148,7 @@ pub(crate) fn fetch<'py>(
 }
 
 /// Fetches on a throwaway runtime with a client and AWS credential cache of its own, so a process that fetches here
-/// can still fork. It does not follow redirects, as main's import-time `httpx.get` did not. `resume_from` continues a fetch whose first attempt failed retryably
+/// can still fork. `resume_from` continues a fetch whose first attempt failed retryably
 pub(crate) fn fetch_blocking(
     py: Python<'_>,
     source: &NativeCostMapSource,
@@ -164,7 +163,7 @@ pub(crate) fn fetch_blocking(
     let fetched = litellm_host_python::release_gil(py, move || {
         logger.scope(|| {
             let client = crate::http::pool()
-                .unpooled(&config, ClientVariant::NoRedirect)
+                .unpooled(&config, ClientVariant::Provider)
                 .map_err(crate::http::client_error)?;
             litellm_host_python::run_isolated(async move {
                 let credentials = default_chain(AwsAuthService::default(), &target);

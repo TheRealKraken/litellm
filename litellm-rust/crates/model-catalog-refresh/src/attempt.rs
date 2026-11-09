@@ -43,7 +43,7 @@ impl Rejected {
     }
 }
 
-/// Any status below 400 is the document, including a redirect the caller's client did not follow
+/// Any status below 400 is the document
 pub(crate) async fn http(
     client: &Client,
     url: Url,

@@ -262,6 +262,29 @@ def test_boot_load_falls_back_to_the_bundled_document(reply: _Reply, fallback_re
     assert source["fallback_reason"] is not None and source["fallback_reason"].startswith(fallback_reason)
 
 
+_MOVED: Final = _Reply(status=302, body=b"", headers={"Location": "/moved.json"})
+_REDIRECTED_DOCUMENT: Final = _document_with(**{"lit-redirected-model": {"litellm_provider": "openai", "mode": "chat"}})
+
+
+@pytest.mark.usefixtures("remote_source", "own_model_cost")
+def test_boot_load_follows_a_redirect_to_the_document():
+    with _serving(_MOVED, _Reply(body=_REDIRECTED_DOCUMENT)) as server:
+        rows: Final = litellm.get_model_cost_map(url=server.url, max_attempts=1)
+
+    assert server.targets == ["/cost.json", "/moved.json"]
+    assert "lit-redirected-model" in rows
+    assert get_model_cost_map_source_info()["source"] == "remote"
+
+
+@pytest.mark.usefixtures("own_model_cost")
+def test_register_model_from_a_url_follows_a_redirect_to_the_document():
+    with _serving(_MOVED, _Reply(body=_REDIRECTED_DOCUMENT)) as server:
+        litellm.register_model(server.url, persist_across_reloads=False)
+
+    assert server.targets == ["/cost.json", "/moved.json"]
+    assert litellm.model_cost["lit-redirected-model"]["litellm_provider"] == "openai"
+
+
 @pytest.mark.usefixtures("remote_source", "own_model_cost")
 def test_boot_load_transient_failure_serves_the_bundled_map_then_installs_the_remote_one_in_the_background():
     body: Final = _document_with(**{"lit-retried-model": {"litellm_provider": "openai", "mode": "chat"}})
@@ -386,7 +409,7 @@ def test_reload_retries_a_429_after_its_retry_after():
 
 @pytest.mark.usefixtures("remote_source", "own_model_cost")
 def test_reload_follows_a_redirect_to_the_document():
-    with _serving(_Reply(status=302, body=b"", headers={"Location": "/moved.json"}), _Reply()) as server:
+    with _serving(_MOVED, _Reply()) as server:
         result: Final = asyncio.run(refetch_model_cost_map(url=server.url, max_attempts=1))
 
     assert isinstance(result, ModelCostMapReloaded)
