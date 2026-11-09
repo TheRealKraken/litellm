@@ -7,6 +7,7 @@ from litellm.proxy.db.pgbouncer import PGBOUNCER_POOLED_ENV_VAR
 from litellm.repositories.database import Database
 
 WRITER_URL: Final = "postgresql://litellm:secret@db.invalid:5432/proxy?connection_limit=3"
+READER_URL: Final = "postgresql://reader:secret@replica.invalid:5432/proxy?connection_limit=3"
 
 
 def _prisma(aclose: AsyncMock | None = None) -> MagicMock:
@@ -24,7 +25,7 @@ def static_password(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.usefixtures("static_password")
 async def test_closing_the_database_closes_prisma() -> None:
     aclose: Final = AsyncMock()
-    database: Final = await Database.open(_prisma(aclose), WRITER_URL)
+    database: Final = await Database.open(_prisma(aclose), WRITER_URL, None)
 
     aclose.assert_not_awaited()
     await database.aclose()
@@ -39,24 +40,24 @@ def _task_names(database: Database) -> tuple[str, ...]:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("static_password")
 async def test_static_password_runs_no_background_task() -> None:
-    database: Final = await Database.open(_prisma(), WRITER_URL)
+    database: Final = await Database.open(_prisma(), WRITER_URL, READER_URL)
 
     assert _task_names(database) == ()
     await database.aclose()
 
 
 @pytest.mark.asyncio
-async def test_closing_the_database_stops_the_token_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_closing_the_database_stops_both_token_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_TOKEN_DB_AUTH", "true")
     monkeypatch.delenv("AZURE_POSTGRESQL_AUTH", raising=False)
     monkeypatch.delenv(PGBOUNCER_POOLED_ENV_VAR, raising=False)
-    database: Final = await Database.open(_prisma(), WRITER_URL)
-    assert _task_names(database) == ("keep_writer_token_fresh",)
+    database: Final = await Database.open(_prisma(), WRITER_URL, READER_URL)
+    assert _task_names(database) == ("keep_token_fresh", "keep_token_fresh")
 
     await database.aclose()
 
     assert all(task.done() for task in database.tasks)
-    assert database.tasks[0].cancelled()
+    assert database.tasks[0].cancelled() and database.tasks[1].cancelled()
 
 
 @pytest.mark.asyncio
@@ -64,6 +65,17 @@ async def test_rejected_native_settings_still_close_prisma() -> None:
     aclose: Final = AsyncMock()
 
     with pytest.raises(ValueError, match="must name a host and a user"):
-        await Database.open(_prisma(aclose), "postgresql://db.invalid/proxy")
+        await Database.open(_prisma(aclose), "postgresql://db.invalid/proxy", None)
+
+    aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("static_password")
+async def test_rejected_reader_settings_still_close_prisma() -> None:
+    aclose: Final = AsyncMock()
+
+    with pytest.raises(ValueError, match="must name a host and a user"):
+        await Database.open(_prisma(aclose), WRITER_URL, "postgresql://replica.invalid/proxy")
 
     aclose.assert_awaited_once()

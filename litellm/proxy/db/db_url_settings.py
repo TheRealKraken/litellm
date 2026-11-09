@@ -273,8 +273,8 @@ def postgres_connection_budget_message(writer_limit: str, reader_limit: str | No
 
     Prisma's ``connection_limit`` is per query engine, and every uvicorn worker
     owns one engine per configured database (writer, plus the reader when
-    ``DATABASE_URL_READ_REPLICA`` is set) plus the native writer pool's fixed
-    ``NATIVE_CONNECTION_SHARE``. The limits are read off the final URLs,
+    ``DATABASE_URL_READ_REPLICA`` is set) plus a native pool beside each, each
+    holding the fixed ``NATIVE_CONNECTION_SHARE``. The limits are read off the final URLs,
     so a reader that pins its own ``connection_limit`` or an operator override in
     ``database_extra_connection_params`` is counted at its real value. The
     server-side cap is shared by every pod, so the number an operator has to keep
@@ -288,13 +288,18 @@ def postgres_connection_budget_message(writer_limit: str, reader_limit: str | No
     except ValueError:
         return (
             "LiteLLM Proxy: Postgres connection budget per pod = workers x (writer connection_limit + native "
-            "writer pool + reader connection_limit) "
+            "writer pool + reader connection_limit + native reader pool) "
             f"(workers={num_workers!r}, writer={writer_limit!r}, reader={reader_limit!r}); "
             "keep pods x that figure under max_connections minus superuser_reserved_connections"
         )
     pools: Final = f"writer connection_limit {writer} + native writer pool {NATIVE_CONNECTION_SHARE}"
-    engines: Final = f"({pools} + reader connection_limit {reader})" if reader_limit is not None else f"({pools})"
-    per_pod: Final = workers * (writer + NATIVE_CONNECTION_SHARE + reader)
+    engines: Final = (
+        f"({pools} + reader connection_limit {reader} + native reader pool {NATIVE_CONNECTION_SHARE})"
+        if reader_limit is not None
+        else f"({pools})"
+    )
+    native_pools: Final = 2 if reader_limit is not None else 1
+    per_pod: Final = workers * (writer + reader + native_pools * NATIVE_CONNECTION_SHARE)
     return (
         f"LiteLLM Proxy: Postgres connection budget per pod = {workers} worker(s) x {engines} = up to {per_pod} "
         "connections; keep pods x that figure under max_connections minus superuser_reserved_connections"

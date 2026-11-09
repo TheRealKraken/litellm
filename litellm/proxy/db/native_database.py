@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Protocol
+from typing import Final
 
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, pkcs12
 
@@ -188,10 +188,6 @@ async def resolve_native_endpoint(url: str) -> NativeEndpointSettings:
     return native_endpoint(url, tls_offered=tls_offered)
 
 
-class PasswordSink(Protocol):
-    def set_writer_password(self, password: str) -> None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class TokenRotation:
     auth: DatabaseTokenAuth
@@ -222,11 +218,23 @@ def writer_token_rotation(url: str) -> TokenRotation | None:
     return TokenRotation(auth=auth, endpoint=parse_iam_endpoint_from_url(url))
 
 
+def reader_token_rotation(url: str) -> TokenRotation | None:
+    """The token rotation the read replica needs, or None for a static password.
+
+    The reader never goes through the in-container PgBouncer, so only the token toggles
+    decide, with the reader's own region, the same as its Prisma client.
+    """
+    auth: Final = resolve_database_token_auth(read_replica=True)
+    if auth is None:
+        return None
+    return TokenRotation(auth=auth, endpoint=parse_iam_endpoint_from_url(url))
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def _refresh(sink: PasswordSink, rotation: TokenRotation, now: Callable[[], datetime]) -> float:
+async def _refresh(install: Callable[[str], None], rotation: TokenRotation, now: Callable[[], datetime]) -> float:
     try:
         token: Final = await asyncio.to_thread(rotation.mint)
     except Exception as error:  # noqa: BLE001  # boto3 and azure-identity raise many types; any failure means retry
@@ -237,12 +245,12 @@ async def _refresh(sink: PasswordSink, rotation: TokenRotation, now: Callable[[]
             TOKEN_RETRY_SECONDS,
         )
         return TOKEN_RETRY_SECONDS
-    sink.set_writer_password(token)
+    install(token)
     return rotation.seconds_until_refresh(token, now())
 
 
-async def keep_writer_token_fresh(
-    sink: PasswordSink,
+async def keep_token_fresh(
+    install: Callable[[str], None],
     rotation: TokenRotation,
     current_token: str,
     now: Callable[[], datetime] = _utcnow,
@@ -256,4 +264,4 @@ async def keep_writer_token_fresh(
     delay = rotation.seconds_until_refresh(current_token, now())  # rebind-ok: each refresh schedules the next
     while True:
         await sleep(delay)
-        delay = await _refresh(sink, rotation, now)
+        delay = await _refresh(install, rotation, now)

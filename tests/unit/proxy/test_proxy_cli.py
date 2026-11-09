@@ -3831,7 +3831,7 @@ class TestReadReplicaConnectionParams:
         )
 
         assert (
-            "1 worker(s) x (writer connection_limit 1 + native writer pool 2 + reader connection_limit 50) = up to 53 connections"
+            "1 worker(s) x (writer connection_limit 1 + native writer pool 2 + reader connection_limit 50 + native reader pool 2) = up to 55 connections"
             in capsys.readouterr().out
         )
 
