@@ -175,22 +175,22 @@ impl CostMap {
     }
 
     /// The installed document as Python serves it: every top-level key but `fallback_generalizations` in document
-    /// order, then each owner's aliases
+    /// order, then each owner's aliases. An `alias_of` row whose target is not a model is dropped
     pub fn loaded(&self) -> Vec<Row<'_>> {
         let documented = self
             .base
             .catalog
             .written()
             .filter(|(key, _)| *key != FALLBACK_GENERALIZATIONS)
-            .map(|(key, written)| Row {
-                key,
-                shape: match written {
+            .filter_map(|(key, written)| {
+                let shape = match written {
                     Written::Entry(_) => RowShape::Model(ModelRow {
-                        fields: self.base.row(key).unwrap_or_default(),
+                        fields: self.base.row(key)?,
                         names: self.base.names(key),
                     }),
                     Written::Section(value) => RowShape::Section(value),
-                },
+                };
+                Some(Row { key, shape })
             });
         let aliases = self.base.groups.iter().flat_map(|(owner, names)| {
             names.iter().skip(1).map(move |alias| Row {

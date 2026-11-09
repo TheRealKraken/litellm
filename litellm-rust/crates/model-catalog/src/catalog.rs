@@ -427,6 +427,7 @@ impl Catalog {
     pub fn section(&self, key: &str) -> Option<&Value> {
         self.sections
             .iter()
+            .filter(|section| is_section(&section.key))
             .find(|section| section.key == key)
             .map(|section| &section.value)
     }

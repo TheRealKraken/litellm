@@ -91,6 +91,34 @@ fn loaded_serves_python_key_order_without_fallback_rules_or_alias_lists() {
 }
 
 #[rstest]
+fn loaded_serves_an_alias_of_row_as_its_target_and_drops_a_dangling_one() {
+    let cost_map = installed(&json!({
+        "real": {"litellm_provider": "p", "x": 1},
+        "real-latest": {"alias_of": "real"},
+        "ghost-latest": {"alias_of": "ghost"},
+        "chain-latest": {"alias_of": "real-latest"},
+        "listed-latest": {"alias_of": "missing", "aliases": ["extra"]},
+    }));
+    let rows = cost_map.loaded();
+    assert_eq!(
+        served(&rows),
+        vec![
+            ("real".to_owned(), json!({"litellm_provider": "p", "x": 1})),
+            (
+                "real-latest".to_owned(),
+                json!({"litellm_provider": "p", "x": 1})
+            ),
+            (
+                "real-latest".to_owned(),
+                json!({"alias_of": "real", "row": {"litellm_provider": "p", "x": 1}})
+            ),
+        ]
+    );
+    assert_eq!(cost_map.registered_row("ghost-latest"), None);
+    assert_eq!(cost_map.registered_keys(), ["real", "real-latest"]);
+}
+
+#[rstest]
 #[case::shrunk(IntegrityLimits::new(0, 0.5).unwrap(), ErrorKind::Shrunk)]
 #[case::below_minimum(IntegrityLimits::new(2, 0.0).unwrap(), ErrorKind::BelowMinimum)]
 fn a_rejected_document_changes_nothing(#[case] limits: IntegrityLimits, #[case] kind: ErrorKind) {
