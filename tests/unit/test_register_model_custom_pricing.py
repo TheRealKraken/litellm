@@ -15,6 +15,7 @@ import itertools
 import json
 import os
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Final, NoReturn
 
 import pytest
@@ -1755,6 +1756,28 @@ def test_a_reload_keeps_what_a_registration_inherited_for_a_key_the_document_lac
     _reload_cost_map()
 
     assert dict(litellm.model_cost[registered_key]) == registered
+
+
+def test_a_persisted_registration_keeps_values_json_cannot_hold_across_a_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(litellm, "model_cost", litellm.model_cost)
+    registered_key: Final = "lit-registered-with-python-values"
+    created_at: Final = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)
+    litellm.register_model(
+        {
+            registered_key: {
+                "litellm_provider": "openai",
+                "input_cost_per_token": Decimal("0.000001"),
+                "created_at": created_at,
+            }
+        }
+    )
+
+    _reload_cost_map()
+
+    assert litellm.model_cost[registered_key]["created_at"] is created_at
+    assert litellm.model_cost[registered_key]["input_cost_per_token"] == Decimal("0.000001")
 
 
 def test_a_reload_keeps_the_document_sub_keys_beside_a_registered_nested_field(

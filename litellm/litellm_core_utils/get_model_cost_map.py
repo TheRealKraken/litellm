@@ -53,7 +53,9 @@ MODEL_COST_MAP_FETCH_MAX_ATTEMPTS: Final = 3
 MODEL_COST_MAP_FETCH_MAX_WAIT_SECONDS: Final = 30.0
 _litellm_import_complete = threading.Event()
 
-model_cost_inputs: Final = NativeModelCostMap.bundled(MODEL_COST_MAP_MIN_MODEL_COUNT, MODEL_COST_MAP_MAX_SHRINK_RATIO)
+model_cost_inputs: Final = NativeModelCostMap.bundled(
+    min_model_count=MODEL_COST_MAP_MIN_MODEL_COUNT, max_shrink_ratio=MODEL_COST_MAP_MAX_SHRINK_RATIO
+)
 
 
 def _is_cli_process() -> bool:
@@ -268,6 +270,12 @@ def _rejected_reason(rejected: NativeRejected, url: str) -> str:
     return f"invalid JSON from {url}: {rejected.reason}"
 
 
+def _warn_rejected(rejected: NativeRejected, url: str) -> None:
+    verbose_logger.warning(
+        "LiteLLM: Fetched model cost map from %s was rejected (%s). Using local backup instead.", url, rejected.reason
+    )
+
+
 async def refetch_model_cost_map(
     url: str,
     timeout: int = 5,
@@ -297,6 +305,9 @@ async def refetch_model_cost_map(
         return ModelCostMapReloadUnavailable(reason=fetched.reason)
     installed: Final = model_cost_inputs.install(fetched.body, fetched.etag)
     if isinstance(installed, NativeRejected):
+        verbose_logger.warning(
+            "LiteLLM: model cost map reload failed: %s. Keeping the currently loaded map.", installed.reason
+        )
         return ModelCostMapReloadUnavailable(reason=_rejected_reason(installed, url))
     _mark_loaded("remote", url, False, None, datetime.now(timezone.utc))
     return ModelCostMapReloaded(model_count=_install(installed))
@@ -319,9 +330,7 @@ def _retry_remote_fetch_in_background(
         _litellm_import_complete.wait()
         installed: Final = model_cost_inputs.install(fetched.body, fetched.etag)
         if isinstance(installed, NativeRejected):
-            verbose_logger.warning(
-                "LiteLLM: Fetched model cost map failed integrity check. Using local backup instead. url=%s", url
-            )
+            _warn_rejected(installed, url)
             return
         _mark_loaded("remote", url, False, None, datetime.now(timezone.utc))
         _install(installed)
@@ -367,9 +376,7 @@ def get_model_cost_map(url: str, timeout: int = 5, max_attempts: int = MODEL_COS
 
     installed: Final = model_cost_inputs.install(fetched.body, fetched.etag)
     if isinstance(installed, NativeRejected):
-        verbose_logger.warning(
-            "LiteLLM: Fetched model cost map failed integrity check. Using local backup instead. url=%s", url
-        )
+        _warn_rejected(installed, url)
         fallback_reason: Final = (
             "Remote data failed integrity validation"
             if installed.integrity

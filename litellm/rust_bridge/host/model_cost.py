@@ -1,6 +1,6 @@
-"""The Python side of the model cost table that Rust asks for: the row type and what Python derives from the table
-(both belong to the Python host), and the registration lookup and merge (shims until lookup and a merge generic over
-the value type move to Rust).
+"""The Python side of the model cost table that Rust asks for: the row type, how a kept registration merges and what
+Python derives from the table (all belong to the Python host), and the registration lookup and row merge (shims until
+lookup moves to Rust).
 
 Contract for every function here:
 - Rust calls it synchronously with the GIL held and no ``NativeModelCostMap`` lock held, since ``resolve`` reaches
@@ -62,6 +62,14 @@ def merged(
     from litellm.utils import model_cost_registration_write
 
     return model_cost_registration_write(current, base, registration)
+
+
+def kept(previous: dict[str, object] | None, registration: Mapping[str, object]) -> dict[str, object]:
+    """The registration ``register_model(persist_across_reloads=True)`` keeps for a key: ``registration`` merged
+    into the one kept before it, as main merged them."""
+    from litellm.utils import update_dictionary
+
+    return update_dictionary(dict(previous or {}), registration)
 
 
 def changed() -> None:

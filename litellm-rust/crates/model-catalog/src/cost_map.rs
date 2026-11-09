@@ -1,18 +1,14 @@
-use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
 use crate::bundled::BUNDLED_REGISTRY;
-use crate::catalog::{Catalog, IntegrityLimits, Written};
-use crate::error::Error;
-use crate::register::Registrations;
-use crate::wire::Fields;
+use crate::catalog::{Catalog, IntegrityLimits};
+use crate::error::{Error, ErrorKind};
 
 const FALLBACK_GENERALIZATIONS: &str = "fallback_generalizations";
-const ALIASES: &str = "aliases";
 
 /// Which document is installed: the `git_blob_id` of its bytes and the ETag it was served with
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,14 +17,12 @@ pub struct Provenance {
     pub etag: Option<String>,
 }
 
-/// The inputs a host's live table is built from: the installed document and the registrations replayed above it.
-/// It never holds the live table itself
+/// An installed cost map document. A host builds its live table from it and replays its registrations above it,
+/// and never writes into it
 #[derive(Clone, Debug)]
 pub struct CostMap {
     base: Arc<Base>,
-    overlay: Registrations,
     provenance: Provenance,
-    bundled_model_count: usize,
 }
 
 #[derive(Debug)]
@@ -38,27 +32,15 @@ struct Base {
     groups: IndexMap<String, Vec<String>>,
 }
 
-/// One key of a served table, in the order Python's dict holds it
-#[derive(Clone, Debug, PartialEq)]
-pub struct Row<'a> {
-    pub key: &'a str,
-    pub shape: RowShape<'a>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum RowShape<'a> {
-    /// The very object served under `owner`, which this key is an alias of
-    AliasOf(&'a str),
-    Model(ModelRow<'a>),
-    /// A top-level value that is not a model row, such as `sample_spec`, served as written
-    Section(&'a Value),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModelRow<'a> {
-    pub fields: Cow<'a, Fields>,
-    /// Every name the row is served under, the owner first. Empty for a row without aliases
-    pub names: &'a [String],
+/// Why a fetched document was not installed
+#[derive(Debug, thiserror::Error)]
+pub enum Refused {
+    /// It is not a cost map document
+    #[error(transparent)]
+    Unreadable(Error),
+    /// It parsed but has fewer models than the integrity limits allow
+    #[error(transparent)]
+    Integrity(Error),
 }
 
 impl Base {
@@ -75,50 +57,18 @@ impl Base {
         );
         Self { catalog, groups }
     }
-
-    /// The installed row as Python serves it, without the `aliases` list its document carried
-    fn row(&self, key: &str) -> Option<Cow<'_, Fields>> {
-        let fields = self
-            .catalog
-            .get(key)
-            .or_else(|| match self.catalog.section(key) {
-                Some(Value::Object(fields)) if key != FALLBACK_GENERALIZATIONS => Some(fields),
-                _ => None,
-            })?;
-        if fields.get(ALIASES).is_none_or(Value::is_null) {
-            return Some(Cow::Borrowed(fields));
-        }
-        Some(Cow::Owned(
-            fields
-                .iter()
-                .filter(|(name, _)| *name != ALIASES)
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect(),
-        ))
-    }
-
-    fn names(&self, key: &str) -> &[String] {
-        let owner = self.catalog.aliases().get(key).map_or(key, String::as_str);
-        self.groups
-            .get(owner)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
 }
 
-static BUNDLED: LazyLock<CostMap> = LazyLock::new(|| {
-    let catalog = Catalog::parse(BUNDLED_REGISTRY)
-        .expect("the bundled registry parses")
-        .value;
-    CostMap {
-        bundled_model_count: catalog.model_count(),
-        base: Arc::new(Base::new(catalog)),
-        overlay: Registrations::default(),
-        provenance: Provenance {
-            revision: git_blob_id(BUNDLED_REGISTRY),
-            etag: None,
-        },
-    }
+static BUNDLED: LazyLock<CostMap> = LazyLock::new(|| CostMap {
+    base: Arc::new(Base::new(
+        Catalog::parse(BUNDLED_REGISTRY)
+            .expect("the bundled registry parses")
+            .value,
+    )),
+    provenance: Provenance {
+        revision: git_blob_id(BUNDLED_REGISTRY),
+        etag: None,
+    },
 });
 
 impl CostMap {
@@ -126,116 +76,80 @@ impl CostMap {
         BUNDLED.clone()
     }
 
-    /// Installs a fetched document as the base. A document that does not parse, or that has fewer models than
-    /// `limits` allow against the bundled one, changes nothing
-    pub fn accept(
-        &mut self,
+    /// Reads a fetched document. One that does not parse, or that has fewer models than `limits` allow against the
+    /// bundled one, is refused. Every alias problem it has is logged
+    pub fn read(
         body: &[u8],
         etag: Option<String>,
         limits: IntegrityLimits,
-    ) -> Result<&Provenance, Error> {
-        let catalog = Catalog::parse(body)?.value;
-        catalog.check_size(self.bundled_model_count, limits)?;
-        self.base = Arc::new(Base::new(catalog));
-        self.provenance = Provenance {
-            revision: git_blob_id(body),
-            etag,
-        };
-        Ok(&self.provenance)
+    ) -> Result<Self, Refused> {
+        let loaded = Catalog::parse(body).map_err(|error| match error.kind() {
+            ErrorKind::Empty => Refused::Integrity(error),
+            _ => Refused::Unreadable(error),
+        })?;
+        loaded
+            .value
+            .check_size(BUNDLED.base.catalog.model_count(), limits)
+            .map_err(Refused::Integrity)?;
+        for problem in loaded.errors.iter().filter(|error| concerns_aliases(error)) {
+            litellm_tracing::warn!(
+                "LiteLLM: model cost map alias problem: {}",
+                litellm_error::Report::new(problem)
+            );
+        }
+        Ok(Self {
+            base: Arc::new(Base::new(loaded.value)),
+            provenance: Provenance {
+                revision: git_blob_id(body),
+                etag,
+            },
+        })
     }
 
-    /// Installs the bundled document as the base. It is never size checked
-    pub fn accept_bundled(&mut self) -> &Provenance {
-        self.base = Arc::clone(&BUNDLED.base);
-        self.provenance = BUNDLED.provenance.clone();
-        &self.provenance
-    }
-
-    /// Keeps `fields` for `key` across every later install, merged into the key's earlier registration
-    pub fn register(&mut self, key: &str, fields: &Fields) {
-        self.overlay.register(key, fields);
-    }
-
-    /// Records the row key a registration under `registered` was written to
-    pub fn landed(&mut self, written: &str, registered: &str) {
-        self.overlay.landed(written, registered);
-    }
-
-    pub fn registrations(&self) -> &Registrations {
-        &self.overlay
+    pub fn catalog(&self) -> &Catalog {
+        &self.base.catalog
     }
 
     pub fn provenance(&self) -> &Provenance {
         &self.provenance
     }
 
+    /// Every name the row under `key` is served under, the owner first. Empty for a row without aliases
+    pub fn names(&self, key: &str) -> &[String] {
+        let owner = self
+            .catalog()
+            .aliases()
+            .get(key)
+            .map_or(key, String::as_str);
+        self.base
+            .groups
+            .get(owner)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Each owner with its names, the owner first, in the order the document declared the aliases
+    pub fn alias_groups(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.base
+            .groups
+            .iter()
+            .map(|(owner, names)| (owner.as_str(), names.as_slice()))
+    }
+
     /// The `fallback_generalizations` block as the document wrote it
     pub fn fallback_generalizations(&self) -> Option<&Value> {
-        self.base.catalog.section(FALLBACK_GENERALIZATIONS)
-    }
-
-    /// The installed document as Python serves it: every top-level key but `fallback_generalizations` in document
-    /// order, then each owner's aliases. An `alias_of` row whose target is not a model is dropped
-    pub fn loaded(&self) -> Vec<Row<'_>> {
-        let documented = self
-            .base
-            .catalog
-            .written()
-            .filter(|(key, _)| *key != FALLBACK_GENERALIZATIONS)
-            .filter_map(|(key, written)| {
-                let shape = match written {
-                    Written::Entry(_) => RowShape::Model(ModelRow {
-                        fields: self.base.row(key)?,
-                        names: self.base.names(key),
-                    }),
-                    Written::Section(value) => RowShape::Section(value),
-                };
-                Some(Row { key, shape })
-            });
-        let aliases = self.base.groups.iter().flat_map(|(owner, names)| {
-            names.iter().skip(1).map(move |alias| Row {
-                key: alias,
-                shape: RowShape::AliasOf(owner),
-            })
-        });
-        documented.chain(aliases).collect()
-    }
-
-    /// The installed row under `key` with the registrations that apply to it, `None` when neither has one
-    pub fn registered_row(&self, key: &str) -> Option<Cow<'_, Fields>> {
-        let registered = self.overlay.over(&[key]);
-        let base = self.base.row(key);
-        if registered.is_empty() {
-            return base;
-        }
-        Some(Cow::Owned(merged(
-            base.map(Cow::into_owned).unwrap_or_default(),
-            &registered,
-        )))
-    }
-
-    /// The keys `registered_row` answers for, installed keys first
-    pub fn registered_keys(&self) -> Vec<&str> {
-        let loaded: IndexSet<&str> = self.loaded().into_iter().map(|row| row.key).collect();
-        let registered: Vec<&str> = self
-            .overlay
-            .entries()
-            .map(|(key, _)| key)
-            .filter(|key| !loaded.contains(key))
-            .collect();
-        loaded.into_iter().chain(registered).collect()
+        self.catalog().section(FALLBACK_GENERALIZATIONS)
     }
 }
 
-fn merged(base: Fields, registered: &[&Fields]) -> Fields {
-    registered.iter().fold(base, |mut row, fields| {
-        row.extend(
-            fields
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        );
-        row
-    })
+fn concerns_aliases(error: &Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::AliasShadowsModel
+            | ErrorKind::AliasTaken
+            | ErrorKind::AliasTargetMissing
+            | ErrorKind::AliasRowField
+    ) || matches!(error.field().as_deref(), Some("aliases" | "alias_of"))
 }
 
 /// `git hash-object` of the bytes, which main reports as `source_revision`

@@ -6,16 +6,23 @@ one shared ``AliasedCostEntry`` object, when a document is installed.
 """
 
 import json
+import logging
 from typing import Final
+
+import pytest
 
 from litellm.litellm_core_utils.get_model_cost_map import AliasedCostEntry
 from litellm.rust_bridge._native import NativeInstalled, NativeModelCostMap, NativeRejected
 
 
-def _installed(document: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+def _install(document: dict[str, dict[str, object]]) -> NativeInstalled:
     installed: Final = NativeModelCostMap.bundled(0, 0.0).install(json.dumps(document).encode())
     assert isinstance(installed, NativeInstalled)
-    return installed.rows
+    return installed
+
+
+def _installed(document: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    return _install(document).rows
 
 
 def _row(**fields: object) -> dict[str, object]:
@@ -114,6 +121,74 @@ class TestAliasConflicts:
 
         assert result["shared-alias"] is result["model-a"]
         assert result["shared-alias"]["input_cost_per_token"] == 1e-06
+
+
+class TestAliasOfRows:
+    def test_an_alias_of_row_is_served_as_its_target_where_the_document_put_it(self):
+        """An ``alias_of`` row is its target's object, even when written before the target."""
+        result = _installed(
+            {
+                "model-latest": {"alias_of": "model"},
+                "model": _row(input_cost_per_token=1e-06),
+            }
+        )
+
+        assert list(result) == ["model-latest", "model"]
+        assert result["model-latest"] is result["model"]
+        assert result["model"] == _row(input_cost_per_token=1e-06)
+
+    @pytest.mark.parametrize(
+        "pointer", [{"alias_of": "ghost"}, {"alias_of": "model", "mode": "chat"}], ids=["no-target", "other-fields"]
+    )
+    def test_an_alias_of_row_the_catalog_cannot_serve_is_dropped(self, pointer: dict[str, object]):
+        result = _installed({"model": _row(), "model-latest": pointer})
+
+        assert list(result) == ["model"]
+
+    def test_the_model_count_is_every_key_the_document_serves(self):
+        installed: Final = _install(
+            {
+                "model": _row(aliases=["model-dated"]),
+                "model-latest": {"alias_of": "model"},
+                "ghost-latest": {"alias_of": "ghost"},
+                "sample_spec": {"mode": "chat"},
+            }
+        )
+
+        assert list(installed.rows) == ["model", "model-latest", "sample_spec", "model-dated"]
+        assert installed.model_count == 4
+
+
+class TestAliasWarnings:
+    @pytest.mark.parametrize(
+        ("document", "warned"),
+        [
+            ({"model": _row(), "other": _row(aliases=["model"])}, 'alias "model" is already a model name'),
+            (
+                {"a": _row(aliases=["shared"]), "b": _row(aliases=["shared"])},
+                'alias "shared" already belongs to a',
+            ),
+            ({"model": _row(), "ghost-latest": {"alias_of": "ghost"}}, 'alias_of "ghost" is not a model name'),
+            (
+                {"model": _row(), "model-latest": {"alias_of": "model", "mode": "chat"}},
+                "model-latest.mode: an alias_of row carries no other field",
+            ),
+            ({"model": _row(aliases="model-dated")}, "model.aliases: invalid value"),
+        ],
+    )
+    def test_an_alias_the_document_cannot_serve_is_logged(
+        self, caplog: pytest.LogCaptureFixture, document: dict[str, dict[str, object]], warned: str
+    ):
+        with caplog.at_level(logging.WARNING, logger="LiteLLM"):
+            _installed(document)
+
+        assert any(warned in record.getMessage() for record in caplog.records), caplog.text
+
+    def test_a_document_with_servable_aliases_logs_nothing(self, caplog: pytest.LogCaptureFixture):
+        with caplog.at_level(logging.WARNING, logger="LiteLLM"):
+            _installed({"model": _row(aliases=["model-dated"]), "model-latest": {"alias_of": "model"}})
+
+        assert caplog.records == []
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,9 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
+import re
 import ssl
 import sys
 import threading
@@ -383,6 +385,16 @@ def test_reload_retries_a_429_after_its_retry_after():
 
 
 @pytest.mark.usefixtures("remote_source", "own_model_cost")
+def test_reload_follows_a_redirect_to_the_document():
+    with _serving(_Reply(status=302, body=b"", headers={"Location": "/moved.json"}), _Reply()) as server:
+        result: Final = asyncio.run(refetch_model_cost_map(url=server.url, max_attempts=1))
+
+    assert isinstance(result, ModelCostMapReloaded)
+    assert server.targets == ["/cost.json", "/moved.json"]
+    assert get_model_cost_map_provenance()["source_revision"] == _blob_id(_BUNDLED)
+
+
+@pytest.mark.usefixtures("remote_source", "own_model_cost")
 def test_reload_gives_up_after_its_attempts():
     with _serving(_Reply(status=503, body=b"busy", headers={"Retry-After": "0"})) as server:
         result: Final = asyncio.run(refetch_model_cost_map(url=server.url, max_attempts=3))
@@ -411,6 +423,29 @@ def test_a_failed_reload_keeps_the_installed_map(reply: _Reply, reason: str):
     assert server.requests == 1
     assert litellm.model_cost is installed
     assert get_model_cost_map_provenance() == provenance
+
+
+@pytest.mark.usefixtures("remote_source", "own_model_cost")
+def test_a_reload_rejected_by_the_integrity_limits_logs_the_counts(caplog: pytest.LogCaptureFixture):
+    with (
+        _serving(_Reply(body=json.dumps({"only": {"litellm_provider": "openai"}}).encode())) as server,
+        caplog.at_level(logging.WARNING, logger="LiteLLM"),
+    ):
+        asyncio.run(refetch_model_cost_map(url=server.url))
+
+    assert "has 1 models, below minimum" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("limits", "message"),
+    [
+        ({"min_model_count": -1, "max_shrink_ratio": 0.5}, "min_model_count must be 0 or more, got -1"),
+        ({"min_model_count": 0, "max_shrink_ratio": 1.5}, "max_shrink_ratio must be between 0 and 1, got 1.5"),
+    ],
+)
+def test_integrity_limits_out_of_range_name_the_limit_and_value(limits: dict[str, float], message: str):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        NativeModelCostMap.bundled(**limits)
 
 
 @pytest.mark.usefixtures("own_model_cost")
